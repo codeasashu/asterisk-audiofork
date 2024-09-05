@@ -201,33 +201,6 @@ static int audiosync_fs_close(struct audiosync *audiosync) {
   return 0;
 }
 
-/*
-        1 = success
-        0 = fail
-*/
-int audiosync_fs_connect(struct audiosync *audiosync) {
-  ast_verb(2, "<%s> [audiosync] (%s) Connecting to sync\n",
-           ast_channel_name(audiosync->autochan->chan),
-           audiosync->direction_string);
-  audiosync->audio_fd =
-      open(audiosync->filename, O_WRONLY | O_CREAT | O_APPEND, 0644);
-  if (audiosync->audio_fd == -1) {
-    // perror("Failed to open audio file to write");
-    ast_log(LOG_ERROR,
-            "<%s> [audiosync] (%s) Failed to open audio file to write\n",
-            ast_channel_name(audiosync->autochan->chan),
-            audiosync->direction_string);
-    ast_autochan_destroy(audiosync->autochan);
-    audiosync_free(audiosync);
-    return -1;
-  } else {
-    ast_log(LOG_INFO, "<%s> [audiosync] (%s) opened audio file to write: %s\n",
-            ast_channel_name(audiosync->autochan->chan),
-            audiosync->direction_string, audiosync->filename);
-  }
-  return 0;
-}
-
 static void audiosync_free(struct audiosync *audiosync) {
   if (audiosync) {
     if (audiosync->audiosync_ds) {
@@ -237,7 +210,6 @@ static void audiosync_free(struct audiosync *audiosync) {
     }
 
     ast_free(audiosync->name);
-    // ast_free(audiosync->post_process);  // @TODO: implement this
     ast_free(audiosync->filename);
 
     audiosync_fs_close(audiosync);
@@ -247,6 +219,40 @@ static void audiosync_free(struct audiosync *audiosync) {
 
     ast_free(audiosync);
   }
+}
+
+/*
+        1 = success
+        0 = fail
+*/
+int audiosync_fs_connect(struct audiosync *audiosync) {
+  int fd;
+  ast_verb(2, "<%s> [audiosync] (%s) Opening recording file %s \n",
+           ast_channel_name(audiosync->autochan->chan),
+           audiosync->direction_string,
+	   audiosync->filename);
+  fd = open(audiosync->filename, O_WRONLY | O_CREAT | O_APPEND, 0666);
+  if(fd < 0) {
+    ast_log(LOG_ERROR, "Unable to open recording file %s : %s\n", audiosync->filename, strerror(errno));
+    ast_autochan_destroy(audiosync->autochan);
+    audiosync_free(audiosync);
+    return -1;
+  }
+  audiosync->audio_fd = fd;
+  if (audiosync->audio_fd == -1) {
+    ast_log(LOG_ERROR,
+            "<%s> [audiosync] (%s) Failed to open recording file to write\n",
+            ast_channel_name(audiosync->autochan->chan),
+            audiosync->direction_string);
+    ast_autochan_destroy(audiosync->autochan);
+    audiosync_free(audiosync);
+    return -1;
+  } else {
+    ast_verb(2, "<%s> [audiosync] (%s) opened recording file to write: %s\n",
+            ast_channel_name(audiosync->autochan->chan),
+            audiosync->direction_string, audiosync->filename);
+  }
+  return 0;
 }
 
 static void *audiosync_thread(void *obj) {
@@ -332,17 +338,17 @@ static void *audiosync_thread(void *obj) {
       // ast_channel_name(audiosync->autochan->chan));
       // ast_mutex_lock(&audiosync->audiosync_ds->lock);
 
-      ast_log(LOG_INFO,
+      ast_verb(2,
               "<%s> [audiosync] (%s) Received audio data to write (len=%lu) \n",
               ast_channel_name(audiosync->autochan->chan),
               audiosync->direction_string, cur->datalen);
       ssize_t bytes_written =
           write(audiosync->audio_fd, cur->data.ptr, cur->datalen);
-      ast_log(
-          LOG_INFO,
+      ast_verb(
+          2,
           "<%s> [audiosync] (%s) Written %d bytes audio data to file (%s) \n",
           ast_channel_name(audiosync->autochan->chan),
-          audiosync->direction_string, cur->bytes_written, audiosync->filename);
+          audiosync->direction_string, bytes_written, audiosync->filename);
       frames_sent++;
     }
 
@@ -485,7 +491,7 @@ static int launch_audiosync_thread(struct ast_channel *chan,
 
   /* Server */
   if (!ast_strlen_zero(filename)) {
-    ast_verb(2, "<%s> [audiosync] (%s) Setting filename: %s\n",
+    ast_verb(2, "<%s> [audiosync] (%s) Setting audio filename: %s\n",
              ast_channel_name(chan), audiosync->direction_string, filename);
     audiosync->filename = ast_strdup(filename);
   }
