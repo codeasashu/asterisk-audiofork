@@ -402,7 +402,7 @@ static int setup_audiosync_ds(struct audiosync *audiosync,
 
   audiosync_ds->samp_rate = 8000;
   audiosync_ds->audiohook = &audiosync->audiohook;
-  // audiosync_ds->filename = ast_strdup(audiosync->filename);
+  audiosync_ds->filename = ast_strdup(audiosync->filename);
   datastore->data = audiosync_ds;
 
   ast_channel_lock(chan);
@@ -413,7 +413,7 @@ static int setup_audiosync_ds(struct audiosync *audiosync,
   return 0;
 }
 
-static int launch_audiosync_thread(struct ast_channel *chan, unsigned int flags,
+static int launch_audiosync_thread(struct ast_channel *chan, const char *filename, unsigned int flags,
                                    enum ast_audiohook_direction direction,
                                    const char *uid_channel_var) {
   pthread_t thread;
@@ -461,6 +461,11 @@ static int launch_audiosync_thread(struct ast_channel *chan, unsigned int flags,
            ast_channel_name(chan), audiosync->direction_string);
 
   /* Server */
+  if (!ast_strlen_zero(filename)) {
+    ast_verb(2, "<%s> [audiosync] (%s) Setting filename: %s\n", ast_channel_name(chan), audiosync->direction_string, filename);
+    audiosync->filename = ast_strdup(filename);
+  }
+
   if (setup_audiosync_ds(audiosync, chan, &datastore_id)) {
     ast_autochan_destroy(audiosync->autochan);
     audiosync_free(audiosync);
@@ -560,7 +565,7 @@ static int audiosync_exec(struct ast_channel *chan, const char *data) {
    * until it is finished. */
   ast_module_ref(ast_module_info->self);
 
-  if (launch_audiosync_thread(chan, flags.flags, direction, uid_channel_var)) {
+  if (launch_audiosync_thread(chan, args.filename, flags.flags, direction, uid_channel_var)) {
 
     /* Failed */
     ast_module_unref(ast_module_info->self);
@@ -610,9 +615,6 @@ static struct ast_custom_function audiosync_function = {
     .read = func_audiosync_read,
 };
 
-static struct ast_cli_entry cli_audiosync[] = {
-    AST_CLI_DEFINE(handle_cli_audiosync, "Execute a audiosync command")};
-
 static int set_audiosync_methods(void) { return 0; }
 
 static int clear_audiosync_methods(void) { return 0; }
@@ -620,12 +622,8 @@ static int clear_audiosync_methods(void) { return 0; }
 static int unload_module(void) {
   int res;
 
-  ast_cli_unregister_multiple(cli_audiosync, ARRAY_LEN(cli_audiosync));
-  res = ast_unregister_application(stop_app);
-  res |= ast_unregister_application(app);
-  res |= ast_manager_unregister("audiosyncMute");
-  res |= ast_manager_unregister("audiosync");
-  res |= ast_manager_unregister("Stopaudiosync");
+  // ast_cli_unregister_multiple(cli_audiosync, ARRAY_LEN(cli_audiosync));
+  res = ast_unregister_application(app);
   res |= ast_custom_function_unregister(&audiosync_function);
   res |= clear_audiosync_methods();
 
@@ -635,7 +633,7 @@ static int unload_module(void) {
 static int load_module(void) {
   int res;
 
-  ast_cli_register_multiple(cli_audiosync, ARRAY_LEN(cli_audiosync));
+  // ast_cli_register_multiple(cli_audiosync, ARRAY_LEN(cli_audiosync));
   res = ast_register_application_xml(app, audiosync_exec);
   res |= ast_custom_function_register(&audiosync_function);
   res |= set_audiosync_methods();
