@@ -109,7 +109,7 @@ static const char *const audiosync_spy_type = "audiosync";
 struct audiosync {
   struct ast_audiohook audiohook;
   char *filename;
-  int mfd;
+  int audio_fd; // audio fd
   enum ast_audiohook_direction direction;
   const char *direction_string;
   char *name;
@@ -195,8 +195,9 @@ static int start_audiosync(struct ast_channel *chan,
   return ast_audiohook_attach(chan, audiohook);
 }
 
-static int audiosync_ws_close(struct audiosync *audiosync) {
+static int audiosync_fs_close(struct audiosync *audiosync) {
   ast_verb(2, "[audiosync] Closing sync\n");
+  close(audiosync->audio_fd);
   return 0;
 }
 
@@ -204,10 +205,26 @@ static int audiosync_ws_close(struct audiosync *audiosync) {
         1 = success
         0 = fail
 */
-int audiosync_ws_connect(struct audiosync *audiosync) {
+int audiosync_fs_connect(struct audiosync *audiosync) {
   ast_verb(2, "<%s> [audiosync] (%s) Connecting to sync\n",
            ast_channel_name(audiosync->autochan->chan),
            audiosync->direction_string);
+  audiosync->audio_fd =
+      open(audiosync->filename, O_WRONLY | O_CREAT | O_APPEND, 0644);
+  if (audiosync->audio_fd == -1) {
+    // perror("Failed to open audio file to write");
+    ast_log(LOG_ERROR,
+            "<%s> [audiosync] (%s) Failed to open audio file to write\n",
+            ast_channel_name(audiosync->autochan->chan),
+            audiosync->direction_string);
+    ast_autochan_destroy(audiosync->autochan);
+    audiosync_free(audiosync);
+    return -1;
+  } else {
+    ast_log(LOG_INFO, "<%s> [audiosync] (%s) opened audio file to write: %s\n",
+            ast_channel_name(audiosync->autochan->chan),
+            audiosync->direction_string, audiosync->filename);
+  }
   return 0;
 }
 
@@ -223,7 +240,7 @@ static void audiosync_free(struct audiosync *audiosync) {
     // ast_free(audiosync->post_process);  // @TODO: implement this
     ast_free(audiosync->filename);
 
-    audiosync_ws_close(audiosync);
+    audiosync_fs_close(audiosync);
 
     /* clean stringfields */
     ast_string_field_free_memory(audiosync);
@@ -247,7 +264,7 @@ static void *audiosync_thread(void *obj) {
     ast_callid_threadassoc_add(audiosync->callid);
   }
 
-  result = audiosync_ws_connect(audiosync);
+  result = audiosync_fs_connect(audiosync);
   if (result != 0) {
     ast_log(LOG_ERROR, "<%s> Could not connect to sync: %s\n",
             ast_channel_name(audiosync->autochan->chan),
@@ -315,12 +332,17 @@ static void *audiosync_thread(void *obj) {
       // ast_channel_name(audiosync->autochan->chan));
       // ast_mutex_lock(&audiosync->audiosync_ds->lock);
 
-      // @TODO write data to file here
-      //
-      ast_log(LOG_ERROR,
+      ast_log(LOG_INFO,
               "<%s> [audiosync] (%s) Received audio data to write (len=%lu) \n",
               ast_channel_name(audiosync->autochan->chan),
               audiosync->direction_string, cur->datalen);
+      ssize_t bytes_written =
+          write(audiosync->audio_fd, cur->data.ptr, cur->datalen);
+      ast_log(
+          LOG_INFO,
+          "<%s> [audiosync] (%s) Written %d bytes audio data to file (%s) \n",
+          ast_channel_name(audiosync->autochan->chan),
+          audiosync->direction_string, cur->bytes_written, audiosync->filename);
       frames_sent++;
     }
 
@@ -413,7 +435,8 @@ static int setup_audiosync_ds(struct audiosync *audiosync,
   return 0;
 }
 
-static int launch_audiosync_thread(struct ast_channel *chan, const char *filename, unsigned int flags,
+static int launch_audiosync_thread(struct ast_channel *chan,
+                                   const char *filename, unsigned int flags,
                                    enum ast_audiohook_direction direction,
                                    const char *uid_channel_var) {
   pthread_t thread;
@@ -462,7 +485,8 @@ static int launch_audiosync_thread(struct ast_channel *chan, const char *filenam
 
   /* Server */
   if (!ast_strlen_zero(filename)) {
-    ast_verb(2, "<%s> [audiosync] (%s) Setting filename: %s\n", ast_channel_name(chan), audiosync->direction_string, filename);
+    ast_verb(2, "<%s> [audiosync] (%s) Setting filename: %s\n",
+             ast_channel_name(chan), audiosync->direction_string, filename);
     audiosync->filename = ast_strdup(filename);
   }
 
@@ -565,7 +589,8 @@ static int audiosync_exec(struct ast_channel *chan, const char *data) {
    * until it is finished. */
   ast_module_ref(ast_module_info->self);
 
-  if (launch_audiosync_thread(chan, args.filename, flags.flags, direction, uid_channel_var)) {
+  if (launch_audiosync_thread(chan, args.filename, flags.flags, direction,
+                              uid_channel_var)) {
 
     /* Failed */
     ast_module_unref(ast_module_info->self);
