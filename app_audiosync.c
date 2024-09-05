@@ -137,11 +137,10 @@ enum audiosync_args {
   OPT_ARG_ARRAY_SIZE, /* Always last element of the enum */
 };
 
-AST_APP_OPTIONS(
-    audiosync_opts,
-    {
-        AST_APP_OPTION_ARG('D', MUXFLAG_DIRECTION, OPT_ARG_DIRECTION),
-    });
+AST_APP_OPTIONS(audiosync_opts, {
+                                    AST_APP_OPTION_ARG('D', MUXFLAG_DIRECTION,
+                                                       OPT_ARG_DIRECTION),
+                                });
 
 struct audiosync_ds {
   unsigned int destruction_ok;
@@ -206,10 +205,9 @@ static int audiosync_ws_close(struct audiosync *audiosync) {
         0 = fail
 */
 int audiosync_ws_connect(struct audiosync *audiosync) {
-    ast_verb(2,
-             "<%s> [audiosync] (%s) Connecting to sync\n",
-             ast_channel_name(audiosync->autochan->chan),
-             audiosync->direction_string);
+  ast_verb(2, "<%s> [audiosync] (%s) Connecting to sync\n",
+           ast_channel_name(audiosync->autochan->chan),
+           audiosync->direction_string);
   return 0;
 }
 
@@ -320,9 +318,9 @@ static void *audiosync_thread(void *obj) {
       // @TODO write data to file here
       //
       ast_log(LOG_ERROR,
-                "<%s> [audiosync] (%s) Received audio data to write (len=%lu) \n",
-                ast_channel_name(audiosync->autochan->chan),
-                audiosync->direction_string, cur->datalen);
+              "<%s> [audiosync] (%s) Received audio data to write (len=%lu) \n",
+              ast_channel_name(audiosync->autochan->chan),
+              audiosync->direction_string, cur->datalen);
       frames_sent++;
     }
 
@@ -415,9 +413,9 @@ static int setup_audiosync_ds(struct audiosync *audiosync,
   return 0;
 }
 
-static int launch_audiosync_thread(
-    struct ast_channel *chan, unsigned int flags, enum ast_audiohook_direction direction,
-    const char *uid_channel_var) {
+static int launch_audiosync_thread(struct ast_channel *chan, unsigned int flags,
+                                   enum ast_audiohook_direction direction,
+                                   const char *uid_channel_var) {
   pthread_t thread;
   struct audiosync *audiosync;
   char *datastore_id = NULL;
@@ -571,117 +569,6 @@ static int audiosync_exec(struct ast_channel *chan, const char *data) {
   return 0;
 }
 
-static int stop_audiosync_full(struct ast_channel *chan, const char *data) {
-  struct ast_datastore *datastore = NULL;
-  char *parse = "";
-  struct audiosync_ds *audiosync_ds;
-  const char *beep_id = NULL;
-
-  AST_DECLARE_APP_ARGS(args, AST_APP_ARG(audiosyncid););
-
-  if (!ast_strlen_zero(data)) {
-    parse = ast_strdupa(data);
-  }
-
-  AST_STANDARD_APP_ARGS(args, parse);
-
-  ast_channel_lock(chan);
-
-  datastore = ast_channel_datastore_find(chan, &audiosync_ds_info,
-                                         S_OR(args.audiosyncid, NULL));
-  if (!datastore) {
-    ast_channel_unlock(chan);
-    return -1;
-  }
-  audiosync_ds = datastore->data;
-
-  ast_mutex_lock(&audiosync_ds->lock);
-
-  /* The audiosync thread may be waiting on the audiohook trigger.
-   * In order to exit from the audiosync loop before waiting on channel
-   * destruction, poke the audiohook trigger. */
-  if (audiosync_ds->audiohook) {
-    if (audiosync_ds->audiohook->status != AST_AUDIOHOOK_STATUS_DONE) {
-      ast_audiohook_update_status(audiosync_ds->audiohook,
-                                  AST_AUDIOHOOK_STATUS_SHUTDOWN);
-    }
-    ast_audiohook_lock(audiosync_ds->audiohook);
-    ast_cond_signal(&audiosync_ds->audiohook->trigger);
-    ast_audiohook_unlock(audiosync_ds->audiohook);
-    audiosync_ds->audiohook = NULL;
-  }
-
-  if (!ast_strlen_zero(audiosync_ds->beep_id)) {
-    beep_id = ast_strdupa(audiosync_ds->beep_id);
-  }
-
-  ast_mutex_unlock(&audiosync_ds->lock);
-
-  /* Remove the datastore so the monitor thread can exit */
-  if (!ast_channel_datastore_remove(chan, datastore)) {
-    ast_datastore_free(datastore);
-  }
-
-  ast_channel_unlock(chan);
-
-  if (!ast_strlen_zero(beep_id)) {
-    ast_beep_stop(chan, beep_id);
-  }
-
-  return 0;
-}
-
-static int stop_audiosync_exec(struct ast_channel *chan, const char *data) {
-  stop_audiosync_full(chan, data);
-  return 0;
-}
-
-static char *handle_cli_audiosync(struct ast_cli_entry *e, int cmd,
-                                  struct ast_cli_args *a) {
-  struct ast_channel *chan;
-  struct ast_datastore *datastore = NULL;
-  struct audiosync_ds *audiosync_ds = NULL;
-
-  switch (cmd) {
-  case CLI_INIT:
-    e->command = "audiosync {start|stop|list}";
-    e->usage = "Usage: audiosync start <chan_name> [args]\n"
-               "         The optional arguments are passed to the audiosync "
-               "application.\n"
-               "       audiosync stop <chan_name> [args]\n"
-               "         The optional arguments are passed to the "
-               "Stopaudiosync application.\n"
-               "       audiosync list <chan_name>\n";
-    return NULL;
-  case CLI_GENERATE:
-    return ast_complete_channels(a->line, a->word, a->pos, a->n, 2);
-  }
-
-  if (a->argc < 3) {
-    return CLI_SHOWUSAGE;
-  }
-
-  if (!(chan =
-            ast_channel_get_by_name_prefix(a->argv[2], strlen(a->argv[2])))) {
-    ast_cli(a->fd, "No channel matching '%s' found.\n", a->argv[2]);
-    /* Technically this is a failure, but we don't want 2 errors printing out */
-    return CLI_SUCCESS;
-  }
-
-  if (!strcasecmp(a->argv[1], "start")) {
-    audiosync_exec(chan, (a->argc >= 4) ? a->argv[3] : "");
-  } else if (!strcasecmp(a->argv[1], "stop")) {
-    stop_audiosync_exec(chan, (a->argc >= 4) ? a->argv[3] : "");
-  } else {
-    chan = ast_channel_unref(chan);
-    return CLI_SHOWUSAGE;
-  }
-
-  chan = ast_channel_unref(chan);
-
-  return CLI_SUCCESS;
-}
-
 static int func_audiosync_read(struct ast_channel *chan, const char *cmd,
                                char *data, char *buf, size_t len) {
   struct ast_datastore *datastore;
@@ -750,7 +637,6 @@ static int load_module(void) {
 
   ast_cli_register_multiple(cli_audiosync, ARRAY_LEN(cli_audiosync));
   res = ast_register_application_xml(app, audiosync_exec);
-  res |= ast_register_application_xml(stop_app, stop_audiosync_exec);
   res |= ast_custom_function_register(&audiosync_function);
   res |= set_audiosync_methods();
 
