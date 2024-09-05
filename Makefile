@@ -1,5 +1,5 @@
 #
-# Makefile for Asterisk Audiofork application
+# Makefile for Asterisk Audiosync application
 # borrowed from Asterisk-eSpeak makefile
 #
 # This program is free software, distributed under the terms of
@@ -13,7 +13,7 @@ else
 	MODULES_DIR:=$(INSTALL_PREFIX)$(ASTLIBDIR)
 endif
 ASTETCDIR:=$(INSTALL_PREFIX)/etc/asterisk
-SAMPLENAME:=audiofork.conf.sample
+SAMPLENAME:=audiosync.conf.sample
 CONFNAME:=$(basename $(SAMPLENAME))
 
 INSTALL:=install
@@ -22,31 +22,31 @@ OPTIMIZE:=-O2
 DEBUG:=-g
 
 #LIBS+=-
-CFLAGS+=-pipe -fPIC -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -Wmissing-declarations -D_REENTRANT -D_GNU_SOURCE -DAST_MODULE_SELF_SYM=__internal_app_audiofork_self
+CFLAGS+=-pipe -fPIC -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -Wmissing-declarations -D_REENTRANT -D_GNU_SOURCE -DAST_MODULE_SELF_SYM=__internal_app_audiosync_self -I/usr/src/asterisk/include
 
-all: app_audiofork.so
-	@echo " +-------- app_audiofork Build Complete --------+"
-	@echo " + app_audiofork has successfully been built,   +"
+all: app_audiosync.so
+	@echo " +-------- app_audiosync Build Complete --------+"
+	@echo " + app_audiosync has successfully been built,   +"
 	@echo " + and can be installed by running:          +"
 	@echo " +                                           +"
 	@echo " +               make install                +"
 	@echo " +-------------------------------------------+"
 
-app_audiofork.o: app_audiofork.c
+app_audiosync.o: app_audiosync.c
 	$(CC) $(CFLAGS) $(DEBUG) $(OPTIMIZE) -c -o $@ $*.c
 
-app_audiofork.so: app_audiofork.o
+app_audiosync.so: app_audiosync.o
 	$(CC) -shared -Xlinker -x -o $@ $< $(LIBS)
 
 clean:
-	rm -f app_audiofork.o app_audiofork.so
+	rm -f app_audiosync.o app_audiosync.so
 
 install: all
 	$(INSTALL) -m 755 -d $(DESTDIR)$(MODULES_DIR)
-	$(INSTALL) -m 755 app_audiofork.so $(DESTDIR)$(MODULES_DIR)
-	@echo " +---- app_audiofork Installation Complete -----+"
+	$(INSTALL) -m 755 app_audiosync.so $(DESTDIR)$(MODULES_DIR)
+	@echo " +---- app_audiosync Installation Complete -----+"
 	@echo " +                                           +"
-	@echo " + app_audiofork has successfully been installed+"
+	@echo " + app_audiosync has successfully been installed+"
 	@echo " + If you would like to install the sample   +"
 	@echo " + configuration file run:                   +"
 	@echo " +                                           +"
