@@ -41,6 +41,8 @@
 #define AST_MODULE "Audiosync"
 #endif
 
+#define AUD_SYNC_INITIAL_FILE_SIZE 4096 // 64 kb block
+
 #include "asterisk.h"
 
 #include "asterisk/app.h"
@@ -110,6 +112,7 @@ struct audiosync {
   struct ast_audiohook audiohook;
   char *filename;
   int audio_fd; // audio fd
+  void *audio_mmap; // audio mmap
   enum ast_audiohook_direction direction;
   const char *direction_string;
   char *name;
@@ -198,6 +201,7 @@ static int start_audiosync(struct ast_channel *chan,
 static int audiosync_fs_close(struct audiosync *audiosync) {
   ast_verb(2, "[audiosync] Closing sync\n");
   close(audiosync->audio_fd);
+  // fsync(audiosync->audio_fd); // @TODO: current this doesn't anything. Mayube we need in future
   return 0;
 }
 
@@ -231,7 +235,8 @@ int audiosync_fs_connect(struct audiosync *audiosync) {
            ast_channel_name(audiosync->autochan->chan),
            audiosync->direction_string,
 	   audiosync->filename);
-  fd = open(audiosync->filename, O_WRONLY | O_CREAT | O_APPEND, 0666);
+  //fd = open(audiosync->filename, O_RDWR | O_CREAT | O_APPEND, 0666);
+  fd = open(audiosync->filename, O_RDWR | O_CREAT | O_TRUNC, 0666);
   if(fd < 0) {
     ast_log(LOG_ERROR, "Unable to open recording file %s : %s\n", audiosync->filename, strerror(errno));
     ast_autochan_destroy(audiosync->autochan);
@@ -297,6 +302,13 @@ static void *audiosync_thread(void *obj) {
 
   // fs = &audiosync->audiosync_ds->fs;
 
+  size_t file_size = AUD_SYNC_INITIAL_FILE_SIZE;  // Define an appropriate initial size
+if (ftruncate(audiosync->audio_fd, file_size) == -1) {
+    ast_log(LOG_ERROR, "Failed to set file size: %s\n", strerror(errno));
+    close(audiosync->audio_fd);
+    return -1;
+}
+
   ast_mutex_lock(&audiosync->audiosync_ds->lock);
   format_slin =
       ast_format_cache_get_slin_by_rate(audiosync->audiosync_ds->samp_rate);
@@ -305,6 +317,15 @@ static void *audiosync_thread(void *obj) {
 
   /* The audiohook must enter and exit the loop locked */
   ast_audiohook_lock(&audiosync->audiohook);
+
+  void *mapped_region = mmap(NULL, file_size, PROT_READ | PROT_WRITE, MAP_SHARED, audiosync->audio_fd, 0);
+if (mapped_region == MAP_FAILED) {
+    ast_log(LOG_ERROR, "mmap failed: %s\n", strerror(errno));
+    close(audiosync->audio_fd);
+    return -1 ;
+}
+
+  size_t offset = 0; 
 
   while (audiosync->audiohook.status == AST_AUDIOHOOK_STATUS_RUNNING) {
     // ast_verb(2, "<%s> [audiosync] (%s) Reading Audio Hook frame...\n",
@@ -338,17 +359,50 @@ static void *audiosync_thread(void *obj) {
       // ast_channel_name(audiosync->autochan->chan));
       // ast_mutex_lock(&audiosync->audiosync_ds->lock);
 
+      if (offset + cur->datalen > file_size) {
+        ast_verb(2,
+              "<%s> [audiosync] (%s) GOT BIGGER frame (len=%lu) \n",
+              ast_channel_name(audiosync->autochan->chan),
+              audiosync->direction_string, cur->datalen);
+	if (msync(mapped_region, file_size, MS_SYNC) == -1) {
+	    ast_log(LOG_ERROR, "msync failed: %s\n", strerror(errno));
+                continue;
+	}
+
+	if (munmap(mapped_region, file_size) == -1) {
+                ast_log(LOG_ERROR, "munmap failed: %s\n", strerror(errno));
+                continue;
+        }
+        file_size *= 2;
+	if (ftruncate(audiosync->audio_fd, file_size) == -1) {
+            ast_log(LOG_ERROR, "Failed to extend file size: %s\n", strerror(errno));
+            // close(audiosync->audio_fd);
+            continue;
+        }
+
+        // Remap the extended file
+        mapped_region = mmap(NULL, file_size, PROT_READ | PROT_WRITE, MAP_SHARED, audiosync->audio_fd, 0);
+        if (mapped_region == MAP_FAILED) {
+            ast_log(LOG_ERROR, "mmap failed after remap: %s\n", strerror(errno));
+            // close(audiosync->audio_fd);
+            continue;
+        }
+      }
+
+      // audiosync->audio_mmap = mapped_region;
       ast_verb(2,
               "<%s> [audiosync] (%s) Received audio data to write (len=%lu) \n",
               ast_channel_name(audiosync->autochan->chan),
               audiosync->direction_string, cur->datalen);
-      ssize_t bytes_written =
-          write(audiosync->audio_fd, cur->data.ptr, cur->datalen);
+      memcpy(mapped_region + offset, cur->data.ptr, cur->datalen);
+      // ssize_t bytes_written =
+      //    write(audiosync->audio_fd, cur->data.ptr, cur->datalen);
+      offset += cur->datalen;
       ast_verb(
           2,
-          "<%s> [audiosync] (%s) Written %d bytes audio data to file (%s) \n",
+          "<%s> [audiosync] (%s) Written %d bytes audio data to memory (%s) \n",
           ast_channel_name(audiosync->autochan->chan),
-          audiosync->direction_string, bytes_written, audiosync->filename);
+          audiosync->direction_string, offset, audiosync->filename);
       frames_sent++;
     }
 
@@ -363,6 +417,24 @@ static void *audiosync_thread(void *obj) {
     fr = NULL;
 
     ast_audiohook_lock(&audiosync->audiohook);
+  }
+
+  ast_verb(
+    2,
+    "<%s> [audiosync] (%s) Written %d bytes, fsz=%d audio data to memory \n",
+    ast_channel_name(audiosync->autochan->chan),
+    audiosync->direction_string, offset, file_size);
+  if (msync(mapped_region, offset, MS_SYNC) == -1) {
+      ast_log(LOG_ERROR, "msync failed: %s\n", strerror(errno));
+  }
+  
+  ast_verb(
+    2,
+    "<%s> [audiosync] (%s) dumping %d bytes, fsz=%d audio data to memory \n",
+    ast_channel_name(audiosync->autochan->chan),
+    audiosync->direction_string, offset, file_size);
+  if (munmap(mapped_region, file_size) == -1) {
+      ast_log(LOG_ERROR, "munmap failed: %s\n", strerror(errno));
   }
 
   ast_audiohook_unlock(&audiosync->audiohook);
