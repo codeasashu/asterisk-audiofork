@@ -41,6 +41,15 @@
 #define AST_MODULE "Audiosync"
 #endif
 
+#ifndef AST_SYNC_BKLSZ
+#define AST_SYNC_BKLSZ 4096
+#endif
+
+
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include "asterisk.h"
 
 #include "asterisk/app.h"
@@ -109,6 +118,8 @@ static const char *const audiosync_spy_type = "audiosync";
 struct audiosync {
   struct ast_audiohook audiohook;
   char *filename;
+  void *filemem;
+  struct ast_filestream *fs_read;
   int audio_fd; // audio fd
   enum ast_audiohook_direction direction;
   const char *direction_string;
@@ -197,7 +208,8 @@ static int start_audiosync(struct ast_channel *chan,
 
 static int audiosync_fs_close(struct audiosync *audiosync) {
   ast_verb(2, "[audiosync] Closing sync\n");
-  close(audiosync->audio_fd);
+  // fsync(audiosync->audio_fd);
+  // close(audiosync->audio_fd);
   return 0;
 }
 
@@ -221,6 +233,39 @@ static void audiosync_free(struct audiosync *audiosync) {
   }
 }
 
+void write_with_direct_io(char *filepath, int fd, const void *data, size_t data_len) {
+    ast_log(LOG_ERROR, "stating.... %s\n", filepath);
+    struct stat fstat;
+    stat(filepath, &fstat);
+    int blksize = (int)fstat.st_blksize;
+    ast_log(LOG_ERROR, "blksize %d: %d\n", blksize, fd);
+    int align = blksize-1;
+
+
+    // const char *buff = (char *) malloc((int)blksize+align);
+    // buff = (char *)(((uintptr_t)buff+align)&~((uintptr_t)align));
+
+    // Allocate aligned memory
+    void *aligned_data;
+    posix_memalign(&aligned_data, 4095, data_len);
+    // posix_memalign(&aligned_data, align, data_len);
+
+    // Copy data to aligned buffer
+    memcpy(aligned_data, data, data_len);
+
+    // Write the data using O_DIRECT
+    ssize_t bytes_written = write(fd, aligned_data, data_len);
+    if (bytes_written == -1) {
+        ast_log(LOG_ERROR, "Failed to write recording data to %d : %s\n", fd, strerror(errno));
+    } else {
+        // printf("Written %zd bytes to disk\n", bytes_written);
+        ast_log(LOG_NOTICE, "Successfully write recording data to %d \n", fd);
+    }
+
+    // Free the aligned buffer
+    ast_free(aligned_data);
+}
+
 /*
         1 = success
         0 = fail
@@ -231,7 +276,7 @@ int audiosync_fs_connect(struct audiosync *audiosync) {
            ast_channel_name(audiosync->autochan->chan),
            audiosync->direction_string,
 	   audiosync->filename);
-  fd = open(audiosync->filename, O_WRONLY | O_CREAT | O_APPEND, 0666);
+  fd = open(audiosync->filename, O_WRONLY | O_CREAT | O_DIRECT | O_APPEND, 0666);
   if(fd < 0) {
     ast_log(LOG_ERROR, "Unable to open recording file %s : %s\n", audiosync->filename, strerror(errno));
     ast_autochan_destroy(audiosync->autochan);
@@ -239,20 +284,57 @@ int audiosync_fs_connect(struct audiosync *audiosync) {
     return -1;
   }
   audiosync->audio_fd = fd;
-  if (audiosync->audio_fd == -1) {
-    ast_log(LOG_ERROR,
-            "<%s> [audiosync] (%s) Failed to open recording file to write\n",
-            ast_channel_name(audiosync->autochan->chan),
-            audiosync->direction_string);
-    ast_autochan_destroy(audiosync->autochan);
-    audiosync_free(audiosync);
-    return -1;
-  } else {
-    ast_verb(2, "<%s> [audiosync] (%s) opened recording file to write: %s\n",
-            ast_channel_name(audiosync->autochan->chan),
-            audiosync->direction_string, audiosync->filename);
-  }
+  // ftruncate(fd, 65535);
+  // audiosync->filemem = mmap(NULL, 65535, PROT_WRITE, MAP_SHARED, fd, 0);
+  // if (!audiosync->filemem) {
+  //   ast_log(LOG_ERROR, "<%s> [audiosync] (%s) mmap failed \n",
+  //           ast_channel_name(audiosync->autochan->chan),
+  //           audiosync->direction_string);
+  //   ast_autochan_destroy(audiosync->autochan);
+  //   audiosync_free(audiosync);
+  //   return -1;
+  // }
+  // ast_verb(2, "<%s> [audiosync] (%s) Opened recording file \n",
+  //          ast_channel_name(audiosync->autochan->chan),
+  //          audiosync->direction_string);
+  // memset(audiosync->filemem, 0, 65535);
+  // if (audiosync->audio_fd == -1) {
+  //   ast_log(LOG_ERROR,
+  //           "<%s> [audiosync] (%s) Failed to open recording file to write\n",
+  //           ast_channel_name(audiosync->autochan->chan),
+  //           audiosync->direction_string);
+  //   ast_autochan_destroy(audiosync->autochan);
+  //   audiosync_free(audiosync);
+  //   return -1;
+  // } else {
+  //   ast_verb(2, "<%s> [audiosync] (%s) opened recording file to write: %s\n",
+  //           ast_channel_name(audiosync->autochan->chan),
+  //           audiosync->direction_string, audiosync->filename);
+  // }
   return 0;
+}
+
+static void fs_save_prep(char *filename, struct ast_filestream **fs, unsigned int *oflags, int *errflag, char **ext)
+{
+	/* Initialize the file if not already done so */
+	char *last_slash = NULL;
+	if (!ast_strlen_zero(filename)) {
+		if (!*fs && !*errflag) {
+			*oflags = O_CREAT | O_WRONLY | O_APPEND;
+			last_slash = strrchr(filename, '/');
+			if ((*ext = strrchr(filename, '.')) && (*ext > last_slash)) {
+				**ext = '\0';
+				*ext = *ext + 1;
+			} else {
+				*ext = "raw";
+			}
+
+			if (!(*fs = ast_writefile(filename, *ext, NULL, *oflags, 0, 0666))) {
+				ast_log(LOG_ERROR, "Cannot open %s.%s\n", filename, *ext);
+				*errflag = 1;
+			}
+		}
+	}
 }
 
 static void *audiosync_thread(void *obj) {
@@ -261,36 +343,41 @@ static void *audiosync_thread(void *obj) {
   char *channel_name_cleanup;
   int result;
   int frames_sent = 0;
+  int bytes_sent = 0;
+  unsigned int oflags = O_CREAT | O_WRONLY | O_DIRECT;
+  int errflag = 0;
+  char *fs_read_ext = "raw";
 
   /* Keep callid association before any log messages */
   if (audiosync->callid) {
     ast_verb(2, "<%s> [audiosync] (%s) Keeping Call-ID Association\n",
              ast_channel_name(audiosync->autochan->chan),
              audiosync->direction_string);
-    ast_callid_threadassoc_add(audiosync->callid);
+    // ast_callid_threadassoc_add(audiosync->callid);
   }
 
-  result = audiosync_fs_connect(audiosync);
-  if (result != 0) {
-    ast_log(LOG_ERROR, "<%s> Could not connect to sync: %s\n",
-            ast_channel_name(audiosync->autochan->chan),
-            audiosync->audiosync_ds->filename);
+  // result = audiosync_fs_connect(audiosync);
+  // if (result != 0) {
+  //   ast_log(LOG_ERROR, "<%s> Could not connect to sync: %s\n",
+  //           ast_channel_name(audiosync->autochan->chan),
+  //           audiosync->audiosync_ds->filename);
 
-    ast_test_suite_event_notify("audiosync_END", "Ws server: %s\r\n",
-                                audiosync->filename);
+  //   ast_test_suite_event_notify("audiosync_END", "Ws server: %s\r\n",
+  //                               audiosync->filename);
 
-    /* kill the audiohook */
-    destroy_monitor_audiohook(audiosync);
-    ast_autochan_destroy(audiosync->autochan);
+  //   /* kill the audiohook */
+  //   destroy_monitor_audiohook(audiosync);
+  //   ast_autochan_destroy(audiosync->autochan);
 
-    /* We specifically don't do audiosync_free(audiosync) here because the
-     * automatic datastore cleanup will get it */
+  //   /* We specifically don't do audiosync_free(audiosync) here because the
+  //    * automatic datastore cleanup will get it */
 
-    ast_module_unref(ast_module_info->self);
+  //   ast_module_unref(ast_module_info->self);
 
-    return 0;
-  }
+  //   return 0;
+  // }
 
+  ast_verb(2, "writing to fno21\n");
   ast_verb(2, "<%s> [audiosync] (%s) Begin audiosync Recording %s\n",
            ast_channel_name(audiosync->autochan->chan),
            audiosync->direction_string, audiosync->name);
@@ -305,6 +392,18 @@ static void *audiosync_thread(void *obj) {
 
   /* The audiohook must enter and exit the loop locked */
   ast_audiohook_lock(&audiosync->audiohook);
+
+  ast_verb(2, "writing to fno221\n");
+  audiosync->fs_read = ast_writefile(audiosync->filename, fs_read_ext, NULL, oflags, 0, 0666);
+  // int myfd = open(audiosync->filename, O_CREAT | O_WRONLY | O_APPEND, 0666);
+  // fs_save_prep(audiosync->filename, fs_read, &oflags, &errflag, &fs_read_ext);
+  ast_verb(2, "writing to fno22: %d\n", fileno(audiosync->fs_read->f));
+
+  char *write_buffer = NULL;
+  if (posix_memalign((void **)&write_buffer, 4096, AST_SYNC_BKLSZ) != 0) {
+      ast_log(LOG_ERROR, "Failed to allocate aligned memory for write buffer\n");
+      return;
+  }
 
   while (audiosync->audiohook.status == AST_AUDIOHOOK_STATUS_RUNNING) {
     // ast_verb(2, "<%s> [audiosync] (%s) Reading Audio Hook frame...\n",
@@ -338,17 +437,26 @@ static void *audiosync_thread(void *obj) {
       // ast_channel_name(audiosync->autochan->chan));
       // ast_mutex_lock(&audiosync->audiosync_ds->lock);
 
-      ast_verb(2,
-              "<%s> [audiosync] (%s) Received audio data to write (len=%lu) \n",
-              ast_channel_name(audiosync->autochan->chan),
-              audiosync->direction_string, cur->datalen);
-      ssize_t bytes_written =
-          write(audiosync->audio_fd, cur->data.ptr, cur->datalen);
-      ast_verb(
-          2,
-          "<%s> [audiosync] (%s) Written %d bytes audio data to file (%s) \n",
-          ast_channel_name(audiosync->autochan->chan),
-          audiosync->direction_string, bytes_written, audiosync->filename);
+      if (cur->datalen > AST_SYNC_BKLSZ) {
+	      ast_log(LOG_ERROR, "Frame data size exceeds write buffer size\n");
+	      continue;
+      }
+      memset(write_buffer, 0, AST_SYNC_BKLSZ);
+      memcpy(write_buffer, cur->data.ptr, cur->datalen);
+      size_t bytes_to_write = (cur->datalen + 4095) & ~4095;
+
+      ssize_t bytes_written = write(fileno(audiosync->fs_read->f), write_buffer, bytes_to_write);
+      if (bytes_written == -1) {
+          ast_verb(2,
+                  "<%s> [audiosync] (%s) Write failed (len=%d), error=%s \n",
+                  ast_channel_name(audiosync->autochan->chan),
+                  audiosync->direction_string, cur->datalen, strerror(errno));
+      } else {
+          ast_verb(2,
+                  "<%s> [audiosync] (%s) Received audio data to write (len=%d), file=%s \n",
+                  ast_channel_name(audiosync->autochan->chan),
+                  audiosync->direction_string, cur->datalen, audiosync->filename);
+      }
       frames_sent++;
     }
 
@@ -364,6 +472,11 @@ static void *audiosync_thread(void *obj) {
 
     ast_audiohook_lock(&audiosync->audiohook);
   }
+
+  // fsync(audiosync->audio_fd);
+
+  // msync(audiosync->filemem, bytes_sent, MS_SYNC);
+ //  munmap(audiosync->filemem, bytes_sent);
 
   ast_audiohook_unlock(&audiosync->audiohook);
 
