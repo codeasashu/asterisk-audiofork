@@ -41,7 +41,7 @@
 #define AST_MODULE "Audiosync"
 #endif
 
-#define AUD_SYNC_INITIAL_FILE_SIZE 4096 // 64 kb block
+#define AUD_SYNC_INITIAL_FILE_SIZE 524288 // 512 kb block
 
 #include "asterisk.h"
 
@@ -360,10 +360,6 @@ if (mapped_region == MAP_FAILED) {
       // ast_mutex_lock(&audiosync->audiosync_ds->lock);
 
       if (offset + cur->datalen > file_size) {
-        ast_verb(2,
-              "<%s> [audiosync] (%s) GOT BIGGER frame (len=%lu) \n",
-              ast_channel_name(audiosync->autochan->chan),
-              audiosync->direction_string, cur->datalen);
 	if (msync(mapped_region, file_size, MS_SYNC) == -1) {
 	    ast_log(LOG_ERROR, "msync failed: %s\n", strerror(errno));
                 continue;
@@ -389,20 +385,8 @@ if (mapped_region == MAP_FAILED) {
         }
       }
 
-      // audiosync->audio_mmap = mapped_region;
-      ast_verb(2,
-              "<%s> [audiosync] (%s) Received audio data to write (len=%lu) \n",
-              ast_channel_name(audiosync->autochan->chan),
-              audiosync->direction_string, cur->datalen);
       memcpy(mapped_region + offset, cur->data.ptr, cur->datalen);
-      // ssize_t bytes_written =
-      //    write(audiosync->audio_fd, cur->data.ptr, cur->datalen);
       offset += cur->datalen;
-      ast_verb(
-          2,
-          "<%s> [audiosync] (%s) Written %d bytes audio data to memory (%s) \n",
-          ast_channel_name(audiosync->autochan->chan),
-          audiosync->direction_string, offset, audiosync->filename);
       frames_sent++;
     }
 
@@ -747,5 +731,4 @@ static int load_module(void) {
 AST_MODULE_INFO(ASTERISK_GPL_KEY, AST_MODFLAG_DEFAULT,
                 "Audio Forking application",
                 .support_level = AST_MODULE_SUPPORT_CORE, .load = load_module,
-                .unload = unload_module,
-                .optional_modules = "func_periodic_hook", );
+                .unload = unload_module, );
