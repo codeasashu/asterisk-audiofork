@@ -22,7 +22,7 @@ OPTIMIZE:=-O2
 DEBUG:=-g
 
 #LIBS+=-
-CFLAGS+=-pipe -fPIC -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -Wmissing-declarations -D_REENTRANT -D_GNU_SOURCE -DAST_MODULE_SELF_SYM=__internal_app_audiofork_self
+CFLAGS+=-pipe -fPIC -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -Wmissing-declarations -D_REENTRANT -D_GNU_SOURCE -DAST_MODULE_SELF_SYM=__internal_app_audiofork_self -I/usr/src/asterisk/include
 
 all: app_audiofork.so
 	@echo " +-------- app_audiofork Build Complete --------+"
