@@ -634,7 +634,7 @@ static void *audiofork_thread(void *obj)
 		for (cur = fr; cur; cur = AST_LIST_NEXT(cur, frame_list)) {
 			// ast_verb(2, "<%s> sending audio frame to websocket...\n", ast_channel_name(audiofork->autochan->chan));
 			// ast_mutex_lock(&audiofork->audiofork_ds->lock);
-			ast_verb(2, "<%s> sending audio frame to websocket...\n", ast_channel_name(audiofork->autochan->chan));
+
 			if (ast_websocket_write(audiofork->websocket, AST_WEBSOCKET_OPCODE_BINARY, cur->data.ptr, cur->datalen)) {
 
 				ast_log(LOG_ERROR, "<%s> [AudioFork] (%s) Could not write to websocket.  Reconnecting...\n", ast_channel_name(audiofork->autochan->chan), audiofork->direction_string);
@@ -647,7 +647,6 @@ static void *audiofork_thread(void *obj)
 				}
 
 				/* re-send the last frame */
-			        ast_verb(2, "<%s> re-sending audio frame to websocket...\n", ast_channel_name(audiofork->autochan->chan));
 				if (ast_websocket_write(audiofork->websocket, AST_WEBSOCKET_OPCODE_BINARY, cur->data.ptr, cur->datalen)) {
 					ast_log(LOG_ERROR, "<%s> [AudioFork] (%s) Could not re-write to websocket.  Complete Failure.\n", ast_channel_name(audiofork->autochan->chan), audiofork->direction_string);
 
