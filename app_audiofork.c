@@ -606,8 +606,6 @@ static void audiofork_free(struct audiofork *audiofork) {
 static void *audiofork_thread(void *obj) {
   struct audiofork *audiofork = obj;
   struct ast_format *format_slin;
-  unsigned int audiohook_rate;
-  unsigned int frame_datalen;
 
   char *channel_name_cleanup;
   char *buff;
@@ -653,10 +651,6 @@ static void *audiofork_thread(void *obj) {
   ast_mutex_lock(&audiofork->audiofork_ds->lock);
   format_slin =
       ast_format_cache_get_slin_by_rate(audiofork->audiofork_ds->samp_rate);
-  audiohook_rate = ast_format_get_sample_rate(jack_data->audiohook_format);
-  frame_datalen = audiohook_rate / 50;
-
-  float f_buf[frame_datalen * 150];
 
   ast_mutex_unlock(&audiofork->audiofork_ds->lock);
 
