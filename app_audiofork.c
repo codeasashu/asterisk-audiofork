@@ -51,6 +51,7 @@
 #include <arpa/inet.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include "asterisk/paths.h"     /* use ast_config_AST_MONITOR_DIR */
 #include "asterisk/stringfields.h"
@@ -319,9 +320,7 @@ struct audiofork {
 	struct ast_audiohook audiohook;
 	struct ast_websocket *websocket;
 	char *wsserver;
-        int udp_sock;
-        char *udp_host;
-        char *udp_port;
+        int tcp_sock;
         struct sockaddr_in *sock_addr;
 	struct ast_tls_config *tls_cfg;
 	char *tcert;
@@ -445,13 +444,27 @@ void extract_host_port(const char *address, char *host, char *port) {
     }
 }
 
-int setup_udp_socket(struct audiofork *audiofork) {
-    int udp_sock;
+int set_socket_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) {
+        ast_log(LOG_ERROR, "Failed to set non-blocking TCP. error=%s\n", strerror(errno));
+        return -1;
+    }
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+int setup_tcp_socket(struct audiofork *audiofork) {
     char host[100];
     char port[10];
-    audiofork->udp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (audiofork->udp_sock < 0) {
+    audiofork->tcp_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (audiofork->tcp_sock < 0) {
         ast_log(LOG_ERROR, "Failed to create UDP socket\n");
+        return -1;
+    }
+
+    if (set_socket_nonblocking(audiofork->tcp_sock) < 0) {
+        close(audiofork->tcp_sock);
+        ast_log(LOG_ERROR, "Failed to set non-blocking socket\n");
         return -1;
     }
 
@@ -459,7 +472,7 @@ int setup_udp_socket(struct audiofork *audiofork) {
     audiofork->sock_addr = (struct sockaddr_in *)ast_malloc(sizeof(struct sockaddr_in));
     if (audiofork->sock_addr == NULL) {
        ast_log(LOG_ERROR, "Failed to allocate memory for sockaddr_in");
-       close(audiofork->udp_sock);
+       close(audiofork->tcp_sock);
        return -1;
     }
 
@@ -469,23 +482,44 @@ int setup_udp_socket(struct audiofork *audiofork) {
     ast_log(LOG_ERROR, "UDP host: %s port=%s\n", host, port);
     if(inet_pton(AF_INET, host, &(audiofork->sock_addr->sin_addr)) <= 0) {
 	ast_log(LOG_ERROR, "Invalid IP address\n");
-        close(audiofork->udp_sock);
+        close(audiofork->tcp_sock);
 	ast_free(audiofork->sock_addr);
 	return -1;
     }
-    // audiofork->udp_sock = udp_sock;
-    return audiofork->udp_sock;
+
+    if (connect(audiofork->tcp_sock, (struct sockaddr *)audiofork->sock_addr, sizeof(struct sockaddr_in)) < 0) {
+	if (errno != EINPROGRESS) {
+	    ast_log(LOG_ERROR, "Cannnot connect to host %s via TCP. error=%s \n", host, strerror(errno));
+            close(audiofork->tcp_sock);
+	    ast_free(audiofork->sock_addr);
+	    return -1;
+	}
+    }
+    return audiofork->tcp_sock;
 }
 
-void send_data_over_udp(struct audiofork *audiofork, const char *data, size_t len) {
-    if (!audiofork->sock_addr) {
-        ast_log(LOG_ERROR, "sock_addr is not initialized\n");
-        return;
+void send_data_over_tcp(struct audiofork *audiofork, const char *data, size_t len) {
+    // if (!audiofork->sock_addr) {
+    //     ast_log(LOG_ERROR, "sock_addr is not initialized\n");
+    //     return;
+    // }
+    ssize_t bytes_sent = 0;
+    ssize_t result;
+    while (bytes_sent < len) {
+	    result = send(audiofork->tcp_sock, data + bytes_sent, len - bytes_sent, 0);
+	    if (result < 0) {
+		    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+			    continue;
+		    }
+	            ast_log(LOG_ERROR, "Error sending data via TCP. error=%s \n", strerror(errno));
+		    break;
+	    }
+	    bytes_sent += result;
     }
-    int rett = sendto(audiofork->udp_sock, data, len, MSG_DONTWAIT, (struct sockaddr *)audiofork->sock_addr, sizeof(struct sockaddr_in));
-    if (rett < 0) {
-        ast_log(LOG_ERROR, "Failed to send UDP packet to socket=%d, err=%s\n", audiofork->udp_sock, strerror(errno));
-    }
+    // int rett = sendto(audiofork->tcp_sock, data, len, 0, (struct sockaddr *)audiofork->sock_addr, sizeof(struct sockaddr_in));
+    // if (rett < 0) {
+    //     ast_log(LOG_ERROR, "Failed to send TCP packet to socket=%d, err=%s\n", audiofork->tcp_sock, strerror(errno));
+    // }
 }
 
 static void audiofork_ds_destroy(void *data)
@@ -532,9 +566,9 @@ static int start_audiofork(struct ast_channel *chan, struct ast_audiohook *audio
 static int audiofork_ws_close(struct audiofork *audiofork)
 {
 	int ret;
-	if (audiofork->udp_sock) {
-	    ast_verb(2, "[AudioFork] Closing udp socket\n");
-	    close(audiofork->udp_sock);
+	if (audiofork->tcp_sock) {
+	    ast_verb(2, "[AudioFork] Closing tcp socket\n");
+	    close(audiofork->tcp_sock);
 	    ast_free(audiofork->sock_addr);
 	}
 	ast_verb(2, "[AudioFork] Closing websocket connection\n");
@@ -581,8 +615,8 @@ static enum ast_websocket_result audiofork_ws_connect(struct audiofork *audiofor
 		audiofork->websocket = ast_websocket_client_create(audiofork->audiofork_ds->wsserver, "echo", audiofork->tls_cfg, &result);
 	} else {
 		// ast_verb(2, "<%s> [AudioFork] (%s) Creating to WebSocket server without TLS\n", ast_channel_name(audiofork->autochan->chan), audiofork->direction_string);
-		setup_udp_socket(audiofork);
-		ast_verb(2, "<%s> [AudioFork] (%s) Creating to UDP server without TLS on sock: %d\n", ast_channel_name(audiofork->autochan->chan), audiofork->direction_string, audiofork->udp_sock);
+		setup_tcp_socket(audiofork);
+		ast_verb(2, "<%s> [AudioFork] (%s) Creating to UDP server without TLS on sock: %d\n", ast_channel_name(audiofork->autochan->chan), audiofork->direction_string, audiofork->tcp_sock);
 		// audiofork->websocket = ast_websocket_client_create(audiofork->audiofork_ds->wsserver, "echo", NULL, &result);
 	}
 
@@ -676,12 +710,12 @@ static void *audiofork_thread(void *obj)
 		ast_callid_threadassoc_add(audiofork->callid);
 	}
 
-        int ret = setup_udp_socket(audiofork);
+        int ret = setup_tcp_socket(audiofork);
         if(ret < 0) {
             ast_log(LOG_ERROR, "error setting UDP socket\n");
             return;
         }
-	ast_verb(2, "<%s> [AudioFork] (%s) Created to UDP server without TLS on sock: %d\n", ast_channel_name(audiofork->autochan->chan), audiofork->direction_string, audiofork->udp_sock);
+	ast_verb(2, "<%s> [AudioFork] (%s) Created to UDP server without TLS on sock: %d\n", ast_channel_name(audiofork->autochan->chan), audiofork->direction_string, audiofork->tcp_sock);
 
 	ast_verb(2, "<%s> [AudioFork] (%s) Begin AudioFork Recording %s\n", ast_channel_name(audiofork->autochan->chan), audiofork->direction_string, audiofork->name);
 
@@ -719,7 +753,7 @@ static void *audiofork_thread(void *obj)
 		for (cur = fr; cur; cur = AST_LIST_NEXT(cur, frame_list)) {
 			// ast_verb(2, "<%s> sending audio frame to websocket...\n", ast_channel_name(audiofork->autochan->chan));
 			// ast_mutex_lock(&audiofork->audiofork_ds->lock);
-			send_data_over_udp(audiofork, cur->data.ptr, cur->datalen);
+			send_data_over_tcp(audiofork, cur->data.ptr, cur->datalen);
 			frames_sent++;
 		}
 
