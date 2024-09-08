@@ -320,6 +320,7 @@ struct audiofork {
 	struct ast_audiohook audiohook;
 	struct ast_websocket *websocket;
 	char *wsserver;
+	char *chan_uid;
         int tcp_sock;
         struct sockaddr_in *sock_addr;
 	struct ast_tls_config *tls_cfg;
@@ -496,6 +497,26 @@ int setup_tcp_socket(struct audiofork *audiofork) {
 	}
     }
     return audiofork->tcp_sock;
+}
+
+void send_tcp_uid(struct audiofork *audiofork) {
+    ssize_t bytes_sent = 0;
+    ssize_t result;
+    char uid_message[30];  // To hold the UID message like "uid: 1725805802.7867"
+    snprintf(uid_message, sizeof(uid_message), "uid: %s", audiofork->chan_uid);
+    ssize_t len = strlen(uid_message);
+
+    while (bytes_sent < len) {
+	    result = send(audiofork->tcp_sock, uid_message + bytes_sent, len - bytes_sent, 0);
+	    if (result < 0) {
+		    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+			    continue;
+		    }
+	            ast_log(LOG_ERROR, "Error sending data via TCP. error=%s \n", strerror(errno));
+		    break;
+	    }
+	    bytes_sent += result;
+    }
 }
 
 void send_data_over_tcp(struct audiofork *audiofork, const char *data, size_t len) {
@@ -715,7 +736,7 @@ static void *audiofork_thread(void *obj)
             ast_log(LOG_ERROR, "error setting UDP socket\n");
             return;
         }
-	ast_verb(2, "<%s> [AudioFork] (%s) Created to UDP server without TLS on sock: %d\n", ast_channel_name(audiofork->autochan->chan), audiofork->direction_string, audiofork->tcp_sock);
+	ast_verb(2, "<%s> [AudioFork] (UID: %s) (%s) Connected to TCP server without TLS on sock: %d\n", ast_channel_name(audiofork->autochan->chan), audiofork->chan_uid, audiofork->direction_string, audiofork->tcp_sock);
 
 	ast_verb(2, "<%s> [AudioFork] (%s) Begin AudioFork Recording %s\n", ast_channel_name(audiofork->autochan->chan), audiofork->direction_string, audiofork->name);
 
@@ -728,6 +749,8 @@ static void *audiofork_thread(void *obj)
 
 	/* The audiohook must enter and exit the loop locked */
 	ast_audiohook_lock(&audiofork->audiohook);
+
+	send_tcp_uid(audiofork); // send UID as first message
 
 	while (audiofork->audiohook.status == AST_AUDIOHOOK_STATUS_RUNNING) {
 		// ast_verb(2, "<%s> [AudioFork] (%s) Reading Audio Hook frame...\n", ast_channel_name(audiofork->autochan->chan), audiofork->direction_string);
@@ -966,6 +989,7 @@ static int launch_audiofork_thread(
 
 	ast_verb(2, "<%s> [AudioFork] (%s) Completed Setup\n", ast_channel_name(audiofork->autochan->chan), audiofork->direction_string);
 	if (!ast_strlen_zero(uid_channel_var)) {
+		audiofork->chan_uid = ast_strdup(uid_channel_var);
 		if (datastore_id) {
 			pbx_builtin_setvar_helper(chan, uid_channel_var, datastore_id);
 		}
