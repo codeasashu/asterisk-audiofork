@@ -482,7 +482,7 @@ void send_data_over_udp(struct audiofork *audiofork, const char *data, size_t le
         ast_log(LOG_ERROR, "sock_addr is not initialized\n");
         return;
     }
-    int rett = sendto(audiofork->udp_sock, data, len, 0, (struct sockaddr *)audiofork->sock_addr, sizeof(struct sockaddr_in));
+    int rett = sendto(audiofork->udp_sock, data, len, MSG_DONTWAIT, (struct sockaddr *)audiofork->sock_addr, sizeof(struct sockaddr_in));
     if (rett < 0) {
         ast_log(LOG_ERROR, "Failed to send UDP packet to socket=%d, err=%s\n", audiofork->udp_sock, strerror(errno));
     }
